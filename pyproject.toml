@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mailweek"
+version = "0.3.0"
+description = "A read-only, Ollama-powered CLI agent for weekly email reviews"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Mailweek" }]
+dependencies = [
+  "beautifulsoup4>=4.13.0",
+  "imapclient>=3.0.1",
+  "keyring>=25.6.0",
+  "ollama>=0.6.0",
+  "prompt-toolkit>=3.0.50",
+  "pydantic>=2.10.0",
+  "rich>=13.9.0",
+  "tomli-w>=1.2.0",
+  "typer>=0.26.0,<0.27.0",
+]
+
+[project.scripts]
+mailweek = "mailweek.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.15.0",
+  "pyyaml>=6.0.0",
+  "pytest>=8.3.0",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.11.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mailweek"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+no_implicit_optional = true
+check_untyped_defs = true
+packages = ["mailweek"]

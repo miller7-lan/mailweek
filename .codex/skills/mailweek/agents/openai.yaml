@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mailweek"
+  short_description: "Use Mailweek for private email reviews"
+  default_prompt: "Use $mailweek to check setup and create a read-only weekly email review."
