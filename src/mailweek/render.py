@@ -44,6 +44,10 @@ def emit_startup_banner(
 ) -> None:
     target = console or Console()
     account_label = account or "未选择"
+    if account:
+        next_step = "下一步：直接描述需求，或输入 /review 开始每周审查"
+    else:
+        next_step = "下一步：先添加邮箱账户：/account add"
 
     if target.width < 72:
         compact = Text()
@@ -53,7 +57,8 @@ def emit_startup_banner(
         compact.append(f"模型 {model}", style="dim")
         compact.append("  ·  ◆ ", style="magenta")
         compact.append(f"账户 {account_label}", style="dim")
-        compact.append("\n/help 查看命令", style="dim")
+        compact.append(f"\n{next_step}", style="bright_cyan")
+        compact.append("\n/help 查看全部命令", style="dim")
         target.print(
             Panel(
                 compact,
@@ -84,7 +89,8 @@ def emit_startup_banner(
     brand.append(f"模型 {model}", style="dim")
     brand.append("   ◆ ", style="magenta")
     brand.append(f"账户 {account_label}", style="dim")
-    brand.append("\n/help 查看命令", style="dim")
+    brand.append(f"\n{next_step}", style="bright_cyan")
+    brand.append("\n/help 查看全部命令", style="dim")
 
     layout = Table.grid(padding=(0, 3), expand=True)
     layout.add_column(width=14, no_wrap=True)
@@ -134,14 +140,37 @@ class RichEventRenderer:
             "emails.get_content": "读取邮件正文",
         }.get(str(tool), str(tool))
 
+    @staticmethod
+    def _operation_hint(tools: object) -> str:
+        selected = {str(tool) for tool in tools} if isinstance(tools, list) else set()
+        if "reviews.generate" in selected:
+            return "准备审查邮件：读取邮件并生成优先级登记簿（只读）"
+        if "system.doctor" in selected:
+            return "准备检查 Mailweek、邮箱和 Ollama 的运行状态（只读）"
+        if "folders.list" in selected:
+            return "准备查看邮箱文件夹（只读）"
+        if "emails.get_content" in selected:
+            return "准备查找并读取相关邮件内容（只读）"
+        if "emails.search" in selected:
+            return "准备按条件搜索邮件（只读）"
+        if any(tool.startswith("accounts.") for tool in selected):
+            return "准备查看或切换当前会话账户（不会修改邮件）"
+        return "准备处理请求（邮件操作保持只读）"
+
     def __call__(self, event: str, data: dict[str, Any]) -> None:
         if event == "tools_selected":
-            self.console.print(f"[dim]相关工具：{', '.join(data.get('tools', []))}[/dim]")
+            self.console.print(f"[dim]{self._operation_hint(data.get('tools', []))}[/dim]")
         elif event == "tool_start":
             self.close()
             self.console.print(f"\n[cyan]●[/cyan] {self._tool_label(data['tool'])}")
+            if data.get("tool") == "reviews.generate":
+                self.console.print("  [dim]正在读取并分类，请稍候；按 Ctrl+C 可取消[/dim]")
         elif event == "model_route":
-            fallback = f" · 失败回退 {data['fallback']}" if data.get("fallback") else ""
+            fallback = (
+                f" · 结果不完整时由 {data['fallback']} 自动复核"
+                if data.get("fallback")
+                else ""
+            )
             self.console.print(f"  [dim]分类模型 {data['model']}{fallback}[/dim]")
         elif event == "tool_progress":
             current = int(data.get("current", 0) or 0)
@@ -191,6 +220,51 @@ def _overview_text(
         text.append("\n邮箱出处：", style="dim")
         text.append(account_source, style="cyan")
     return text
+
+
+def _registry_guidance(
+    entries: list[tuple[int, EmailClassification]],
+    *,
+    filter_label: str | None,
+) -> Text:
+    guidance = Text()
+    if not entries:
+        guidance.append("下一步：", style="bold bright_cyan")
+        guidance.append("当前筛选没有结果；输入 ")
+        guidance.append("/list", style="bold")
+        guidance.append(" 返回全部，或换用 ")
+        guidance.append("/list P0", style="bold")
+        guidance.append("、")
+        guidance.append("/list 待处理", style="bold")
+        guidance.append("。")
+        return guidance
+
+    action_entry = next(
+        ((index, item) for index, item in entries if item.action_required),
+        None,
+    )
+    index, item = action_entry or entries[0]
+    guidance.append("下一步：", style="bold bright_cyan")
+    if action_entry:
+        guidance.append(f"建议先处理 #{index}", style="bold")
+        guidance.append(f"（{item.priority.value} · 待处理），")
+    else:
+        guidance.append(f"从 #{index} 开始查看，", style="bold")
+    guidance.append(f"直接输入 {index}", style="bold cyan")
+    guidance.append(" 查看 AI 建议与正文。\n")
+    guidance.append("更多操作：", style="dim")
+    guidance.append("输入编号或 /open 编号查看详情", style="dim")
+    guidance.append(" · ", style="dim")
+    guidance.append("/list P0", style="bold")
+    guidance.append(" 只看紧急", style="dim")
+    guidance.append(" · ", style="dim")
+    guidance.append("/list 待处理", style="bold")
+    guidance.append(" 只看需操作", style="dim")
+    if filter_label:
+        guidance.append(" · ", style="dim")
+        guidance.append("/list", style="bold")
+        guidance.append(" 返回全部", style="dim")
+    return guidance
 
 
 def emit_review_registry(
@@ -252,10 +326,7 @@ def emit_review_registry(
         target.print(table)
     else:
         target.print(Panel("没有匹配当前筛选条件的邮件。", border_style="dim"))
-    target.print(
-        "[dim]输入编号或 [bold]/open 编号[/bold] 查看 AI 建议与正文；"
-        "[bold]/list[/bold] 返回全部；[bold]/list P0[/bold] 可筛选。[/dim]"
-    )
+    target.print(_registry_guidance(entries, filter_label=filter_label))
 
 
 def emit_email_detail(
@@ -329,7 +400,13 @@ def emit_email_detail(
             padding=(1, 2),
         )
     )
-    target.print("[dim]输入 [bold]/back[/bold] 返回登记簿，或直接输入其他编号。[/dim]")
+    detail_guidance = Text()
+    detail_guidance.append("下一步：", style="bold bright_cyan")
+    detail_guidance.append("/back", style="bold")
+    detail_guidance.append(" 返回登记簿 · 输入其他编号切换邮件 · ", style="dim")
+    detail_guidance.append("/list P0", style="bold")
+    detail_guidance.append(" 只看紧急邮件", style="dim")
+    target.print(detail_guidance)
 
 
 def emit_agent_result(
@@ -371,7 +448,9 @@ def emit_error(error: dict[str, Any], *, json_mode: bool) -> None:
     console = Console(stderr=True)
     console.print(f"[red]错误：[/red]{detail.get('message', '未知错误')}")
     if hint := detail.get("hint"):
-        console.print(f"[dim]{hint}[/dim]")
+        console.print(f"[dim]下一步：{hint}[/dim]")
+    else:
+        console.print("[dim]下一步：输入 /help 查看可用操作。[/dim]")
 
 
 def emit_value(value: object, *, json_mode: bool) -> None:
@@ -399,7 +478,20 @@ def emit_accounts(accounts: list[dict[str, Any]], *, json_mode: bool) -> None:
             str(account["host"]),
             "✓" if account.get("active") else "",
         )
-    Console().print(table)
+    console = Console()
+    console.print(table)
+    if accounts:
+        console.print(
+            "[bold bright_cyan]下一步：[/bold bright_cyan]"
+            "[bold]/account 名称[/bold] 切换会话账户 · "
+            "[bold]/account add[/bold] 新增账户 · "
+            "[bold]/review[/bold] 开始审查"
+        )
+    else:
+        console.print(
+            "[bold bright_cyan]下一步：[/bold bright_cyan]"
+            "还没有邮箱账户，请输入 [bold]/account add[/bold]。"
+        )
 
 
 def emit_providers(providers: list[dict[str, Any]], *, json_mode: bool) -> None:
@@ -416,7 +508,12 @@ def emit_providers(providers: list[dict[str, Any]], *, json_mode: bool) -> None:
             str(provider["name"]),
             str(provider.get("imap_host") or "手动输入"),
         )
-    Console().print(table)
+    console = Console()
+    console.print(table)
+    console.print(
+        "[bold bright_cyan]下一步：[/bold bright_cyan]"
+        "输入 [bold]/account add[/bold]，Mailweek 会自动识别邮箱出处并预填 IMAP。"
+    )
 
 
 def emit_tools(tools: list[dict[str, Any]], *, json_mode: bool) -> None:
@@ -429,4 +526,9 @@ def emit_tools(tools: list[dict[str, Any]], *, json_mode: bool) -> None:
     table.add_column("说明")
     for tool in tools:
         table.add_row(tool["name"], "只读", tool["description"])
-    Console().print(table)
+    console = Console()
+    console.print(table)
+    console.print(
+        "[dim]这些工具都不会发送、删除、移动或标记邮件；"
+        "直接描述需求即可由 Mailweek 选择合适工具。[/dim]"
+    )

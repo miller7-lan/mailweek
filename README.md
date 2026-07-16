@@ -136,12 +136,18 @@ mailweek tool call emails.search --args-json \
 
 ```bash
 mailweek --json models benchmark --runs 2
-# 运行 P0–P4 五类固定合成质量用例：
+# 运行覆盖 P0–P4、边界校准和提示词注入的完整合成质量套件：
 mailweek --json models benchmark --suite
+# 只复测一个命名用例：
+mailweek --json models benchmark --case invoice_record --runs 2
 # 与旧参数进行可重复对照：
 mailweek --json models benchmark --body-chars 2200 --num-predict 700 \
   --num-ctx 8192 --schema-in-prompt
 ```
+
+基准只有在所有输出格式有效，并且优先级与行动判断全部命中时才返回 `ok: true`；质量
+失败会使用非零退出码，方便直接接入 CI。结果同时报告 `valid_outputs`、
+`expected_matches` 和 `match_rate`。
 
 ```bash
 mailweek --json tools describe reviews.generate

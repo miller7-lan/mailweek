@@ -146,6 +146,7 @@ class MailService:
         self.secrets = secrets
         self.timeout = timeout
         self._connections: dict[str, IMAPClient] = {}
+        self._metadata: dict[tuple[str, str, str], tuple[EmailHeader, object]] = {}
 
     def _connect(self, account: AccountConfig) -> IMAPClient:
         cached = self._connections.get(account.name)
@@ -155,6 +156,11 @@ class MailService:
                 return cached
             except Exception:
                 self._connections.pop(account.name, None)
+                self._metadata = {
+                    key: value
+                    for key, value in self._metadata.items()
+                    if key[0] != account.name
+                }
         password, _source = self.secrets.get(account)
         if not password:
             raise SecretError(
@@ -273,7 +279,9 @@ class MailService:
             payload = fetched.get(uid, {})
             raw = _find_fetch_value(payload, (b"BODY[HEADER", b"BODY.PEEK[HEADER"))
             structure = payload.get(b"BODYSTRUCTURE")
-            emails.append(self._parse_header(uid, raw, structure))
+            header = self._parse_header(uid, raw, structure)
+            emails.append(header)
+            self._metadata[(account.name, target_folder, str(uid))] = (header, structure)
         return SearchResult(
             account=account.name,
             folder=target_folder,
@@ -289,7 +297,8 @@ class MailService:
         self, account: AccountConfig, uids: list[str], *, folder: str | None = None
     ) -> list[EmailHeader]:
         client = self._connect(account)
-        self._select(client, folder or account.folder)
+        target_folder = folder or account.folder
+        self._select(client, target_folder)
         try:
             fetched = client.fetch(
                 [int(uid) for uid in uids],
@@ -306,7 +315,10 @@ class MailService:
             if not payload:
                 continue
             raw = _find_fetch_value(payload, (b"BODY[HEADER", b"BODY.PEEK[HEADER"))
-            headers.append(self._parse_header(uid, raw, payload.get(b"BODYSTRUCTURE")))
+            structure = payload.get(b"BODYSTRUCTURE")
+            header = self._parse_header(uid, raw, structure)
+            headers.append(header)
+            self._metadata[(account.name, target_folder, uid)] = (header, structure)
         return headers
 
     def get_content(
@@ -318,23 +330,31 @@ class MailService:
         max_chars: int = 6000,
     ) -> EmailContent:
         client = self._connect(account)
-        self._select(client, folder or account.folder)
-        try:
-            fetched = client.fetch(
-                [int(uid)],
-                [
-                    HEADER_FETCH,
-                    "BODYSTRUCTURE",
-                ],
-            )
-            payload = fetched.get(int(uid), {})
-        except Exception as exc:
-            raise MailError("imap_fetch_failed", f"无法读取邮件 UID {uid}。", str(exc)) from exc
-        if not payload:
-            raise MailError("email_not_found", f"未找到邮件 UID {uid}。")
-        header_raw = _find_fetch_value(payload, (b"BODY[HEADER", b"BODY.PEEK[HEADER"))
-        structure = payload.get(b"BODYSTRUCTURE")
-        header = self._parse_header(uid, header_raw, structure)
+        target_folder = folder or account.folder
+        self._select(client, target_folder)
+        cached = self._metadata.get((account.name, target_folder, uid))
+        if cached is not None:
+            header, structure = cached
+        else:
+            try:
+                fetched = client.fetch(
+                    [int(uid)],
+                    [
+                        HEADER_FETCH,
+                        "BODYSTRUCTURE",
+                    ],
+                )
+                payload = fetched.get(int(uid), {})
+            except Exception as exc:
+                raise MailError(
+                    "imap_fetch_failed", f"无法读取邮件 UID {uid}。", str(exc)
+                ) from exc
+            if not payload:
+                raise MailError("email_not_found", f"未找到邮件 UID {uid}。")
+            header_raw = _find_fetch_value(payload, (b"BODY[HEADER", b"BODY.PEEK[HEADER"))
+            structure = payload.get(b"BODYSTRUCTURE")
+            header = self._parse_header(uid, header_raw, structure)
+            self._metadata[(account.name, target_folder, uid)] = (header, structure)
         parts = walk_bodystructure(structure)
         text_parts = [
             part
@@ -385,3 +405,4 @@ class MailService:
             with suppress(Exception):
                 client.logout()
         self._connections.clear()
+        self._metadata.clear()

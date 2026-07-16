@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import date
 
+from mailweek import mail as mail_module
 from mailweek.mail import HEADER_FETCH, MailService, walk_bodystructure
-from mailweek.schemas import AccountConfig
+from mailweek.schemas import AccountConfig, EmailHeader
 
 PLAIN_PART = (
     b"TEXT",
@@ -55,6 +56,9 @@ class FakeIMAPClient:
         self.fetch_requests: list[list[str]] = []
 
     def noop(self) -> None:
+        return None
+
+    def login(self, _username: str, _password: str) -> None:
         return None
 
     def select_folder(self, folder: str, readonly: bool = False):
@@ -125,3 +129,48 @@ def test_get_content_uses_body_peek_and_never_fetches_attachment_part() -> None:
         not any("BODY.PEEK[2]" in field for field in request) for request in fake.fetch_requests
     )
     assert fake.selected == [("INBOX", True)]
+
+
+def test_get_content_reuses_metadata_fetched_by_search() -> None:
+    service, fake, account = _service()
+    service.search(
+        account,
+        date_from=date(2026, 7, 13),
+        date_to=date(2026, 7, 14),
+    )
+
+    result = service.get_content(account, "1")
+
+    metadata_requests = [
+        request for request in fake.fetch_requests if HEADER_FETCH in request
+    ]
+    assert result.body == "Please review the attached invoice."
+    assert len(metadata_requests) == 1
+
+
+def test_reconnect_discards_cached_metadata_for_account(monkeypatch) -> None:
+    service, _old_client, account = _service()
+
+    class DeadClient:
+        def noop(self) -> None:
+            raise ConnectionError("connection lost")
+
+    replacement = FakeIMAPClient()
+    monkeypatch.setattr(
+        mail_module,
+        "IMAPClient",
+        lambda *_args, **_kwargs: replacement,
+    )
+    service._connections["work"] = DeadClient()  # type: ignore[assignment]  # noqa: SLF001
+    service._metadata[("work", "INBOX", "1")] = (  # noqa: SLF001
+        EmailHeader(uid="1", subject="stale subject", sender="stale@example.com"),
+        STRUCTURE,
+    )
+
+    result = service.get_content(account, "1")
+
+    metadata_requests = [
+        request for request in replacement.fetch_requests if HEADER_FETCH in request
+    ]
+    assert result.subject == "Weekly update"
+    assert len(metadata_requests) == 1

@@ -121,6 +121,10 @@ def test_accounts_add_uses_provider_preset_and_hides_password(tmp_path, monkeypa
 def test_repl_help_discovers_account_add_and_provider_commands() -> None:
     help_text = _slash_help()
 
+    assert "直接输入自然语言" in help_text
+    assert "常用操作" in help_text
+    assert "输入编号" in help_text
+    assert "/list 待处理" in help_text
     assert "/account add" in help_text
     assert "/account providers" in help_text
 
@@ -152,6 +156,78 @@ def test_main_turns_usage_errors_into_stable_json(monkeypatch, capsys) -> None:
             "hint": "运行 mailweek --help 查看命令格式。",
         },
     }
+
+
+def test_models_benchmark_uses_nonzero_exit_for_quality_failure(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MAILWEEK_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setattr(
+        "mailweek.cli.run_classifier_benchmark",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "kind": "synthetic_email_classification",
+            "expected_matches": 3,
+            "samples": 5,
+        },
+    )
+
+    result = runner.invoke(app, ["--json", "models", "benchmark", "--suite"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_models_benchmark_passes_named_case_to_quality_runner(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAILWEEK_CONFIG", str(tmp_path / "config.toml"))
+    seen: list[str | None] = []
+
+    def fake_benchmark(*_args, **kwargs):
+        seen.append(kwargs.get("case"))
+        return {"ok": True, "case": kwargs.get("case")}
+
+    monkeypatch.setattr("mailweek.cli.run_classifier_benchmark", fake_benchmark)
+
+    result = runner.invoke(
+        app,
+        ["--json", "models", "benchmark", "--case", "invoice_record"],
+    )
+
+    assert result.exit_code == 0
+    assert seen == ["invoice_record"]
+
+
+def test_models_benchmark_rejects_unknown_case_as_usage_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAILWEEK_CONFIG", str(tmp_path / "config.toml"))
+
+    result = runner.invoke(
+        app,
+        ["--json", "models", "benchmark", "--case", "missing_case"],
+    )
+
+    assert result.exit_code == 2
+    assert "unknown benchmark case" in result.output
+
+
+def test_main_propagates_benchmark_quality_failure_exit_code(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("MAILWEEK_CONFIG", str(tmp_path / "config.toml"))
+    monkeypatch.setattr(
+        "mailweek.cli.run_classifier_benchmark",
+        lambda *_args, **_kwargs: {"ok": False, "samples": 1},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mailweek", "--json", "models", "benchmark", "--case", "invoice_record"],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        main()
+
+    assert raised.value.code == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
 
 
 def test_accounts_test_accepts_account_name_as_positional_argument(tmp_path, monkeypatch) -> None:

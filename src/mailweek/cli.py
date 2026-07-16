@@ -14,6 +14,7 @@ import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress
 from typer._click.exceptions import ClickException
 
@@ -662,7 +663,14 @@ def models_benchmark(
         bool,
         typer.Option("--schema-in-prompt/--no-schema-in-prompt"),
     ] = False,
-    suite: Annotated[bool, typer.Option("--suite", help="运行五类合成质量用例")] = False,
+    suite: Annotated[
+        bool,
+        typer.Option("--suite", help="运行完整合成质量套件"),
+    ] = False,
+    case: Annotated[
+        str | None,
+        typer.Option("--case", help="仅运行一个命名合成质量用例"),
+    ] = None,
 ) -> None:
     """用固定合成邮件测量分类耗时；不会读取真实邮箱。"""
     state = _state(ctx)
@@ -674,17 +682,23 @@ def models_benchmark(
         num_predict=num_predict,
         include_schema_in_prompt=schema_in_prompt,
     )
-    result = _handle(
-        state,
-        lambda: run_classifier_benchmark(
-            state.runtime.services.ollama,
-            model=selected_model,
-            runs=runs,
-            settings=settings,
-            suite=suite,
-        ),
-    )
+    try:
+        result = _handle(
+            state,
+            lambda: run_classifier_benchmark(
+                state.runtime.services.ollama,
+                model=selected_model,
+                runs=runs,
+                settings=settings,
+                suite=suite,
+                case=case,
+            ),
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--case") from exc
     emit_value(result, json_mode=state.json_mode)
+    if not result.get("ok", False):
+        raise typer.Exit(code=1)
 
 
 @emails_app.command("list")
@@ -720,18 +734,26 @@ def emails_list(
 
 def _slash_help() -> str:
     return (
-        "/help                 查看帮助\n"
-        "/review               分类并登记上周邮件\n"
-        "/list [P0|分类]       查看或筛选登记簿\n"
-        "/open 编号            查看 AI 建议与邮件正文\n"
-        "/back                 从详情返回登记簿\n"
-        "/tools  /status       工具与状态\n"
-        "/account              查看账户和邮箱出处\n"
-        "/account add          新增邮箱账户\n"
-        "/account providers    查看支持的邮箱出处\n"
-        "/account 名称         切换会话账户\n"
-        "/model [名称]         查看或切换会话模型\n"
-        "/clear  /cancel  /exit"
+        "可以直接输入自然语言，例如：开始审查最近一周的信件\n\n"
+        "常用操作\n"
+        "  /review                     分类并登记上周邮件\n"
+        "  输入编号 或 /open 编号       查看 AI 建议与邮件正文\n"
+        "  /list                       返回完整登记簿\n"
+        "  /list P0                    只看紧急邮件\n"
+        "  /list 待处理                只看需要操作的邮件\n"
+        "  /back                       从详情返回登记簿\n\n"
+        "账户与模型\n"
+        "  /account                    查看账户和邮箱出处\n"
+        "  /account add                新增邮箱账户\n"
+        "  /account providers          查看支持的邮箱出处\n"
+        "  /account 名称               切换会话账户\n"
+        "  /model [名称]               查看或切换会话模型\n\n"
+        "诊断与会话\n"
+        "  /status  /tools             检查状态、查看只读工具\n"
+        "  /clear                      清除当前分析结果\n"
+        "  /cancel                     查看如何取消运行中的任务\n"
+        "  /exit                       退出 Mailweek\n\n"
+        "提示：Mailweek 不会发送、删除、移动或标记邮件。"
     )
 
 
@@ -901,6 +923,16 @@ def run_repl(state: CLIState) -> None:
                     ),
                 )
                 emit_value(result, json_mode=False)
+                if result.get("ready"):
+                    console.print(
+                        "[bold bright_cyan]下一步：[/bold bright_cyan]"
+                        "状态正常，可输入 [bold]/review[/bold] 开始审查。"
+                    )
+                else:
+                    console.print(
+                        "[bold bright_cyan]下一步：[/bold bright_cyan]"
+                        "按上方提示完成缺失配置，再输入 [bold]/status[/bold] 复查。"
+                    )
             elif command == "/account":
                 account_action = argument.strip()
                 if account_action == "add":
@@ -911,7 +943,7 @@ def run_repl(state: CLIState) -> None:
                     emit_providers(provider_catalog(), json_mode=False)
                 elif account_action:
                     account_name = account_action
-                    result = _handle(
+                    _handle(
                         state,
                         partial(
                             agent.registry.execute,
@@ -919,10 +951,17 @@ def run_repl(state: CLIState) -> None:
                             {"account": account_name},
                         ),
                     )
-                    emit_value(result.output, json_mode=False)
+                    console.print(
+                        f"[green]✓[/green] 已切换到 [bold]{escape(account_name)}[/bold]"
+                        "（仅当前会话）"
+                    )
                     origin = _account_origin_label(state, account_name)
                     if origin:
                         console.print(f"[dim]邮箱出处：{origin}[/dim]")
+                    console.print(
+                        "[bold bright_cyan]下一步：[/bold bright_cyan]"
+                        "原登记簿已清除；输入 [bold]/review[/bold] 审查这个账户。"
+                    )
                     selected_index = None
                 else:
                     emit_accounts(_account_rows(state), json_mode=False)
@@ -930,14 +969,37 @@ def run_repl(state: CLIState) -> None:
                 if argument:
                     models = _handle(state, state.runtime.services.ollama.installed_models)
                     if argument.strip() not in models:
-                        console.print(f"[red]模型未安装：{argument.strip()}[/red]")
+                        console.print(
+                            f"[red]模型未安装：{escape(argument.strip())}[/red]"
+                        )
+                        available = (
+                            "、".join(escape(model) for model in models)
+                            if models
+                            else "未检测到已安装模型"
+                        )
+                        console.print(
+                            f"[dim]可用模型：{available}；用法：/model 模型名[/dim]"
+                        )
                     else:
                         state.runtime.services.session.model = argument.strip()
                         agent.clear()
                         selected_index = None
-                        console.print(f"当前会话模型：{argument.strip()}")
+                        console.print(
+                            f"[green]✓[/green] 当前会话模型：{escape(argument.strip())}"
+                        )
+                        console.print(
+                            "[bold bright_cyan]下一步：[/bold bright_cyan]"
+                            "原登记簿已清除；输入 [bold]/review[/bold] 用新模型重新审查。"
+                        )
                 else:
-                    console.print(f"当前会话模型：{state.runtime.services.session.model}")
+                    console.print(
+                        "当前会话模型："
+                        f"{escape(state.runtime.services.session.model)}"
+                    )
+                    console.print(
+                        "[dim]切换方式：/model 模型名；"
+                        "查看已安装模型：在 Shell 运行 mailweek models list。[/dim]"
+                    )
             elif command == "/review":
                 start, end = _last_week()
                 review_prompt = (
@@ -969,9 +1031,15 @@ def run_repl(state: CLIState) -> None:
             elif command == "/clear":
                 agent.clear()
                 selected_index = None
-                console.print("[dim]当前会话上下文已清除。[/dim]")
+                console.print("[green]✓[/green] 当前会话上下文和登记簿已清除。")
+                console.print(
+                    "[bold bright_cyan]下一步：[/bold bright_cyan]"
+                    "输入 [bold]/review[/bold] 重新生成登记簿，或直接描述新任务。"
+                )
             elif command == "/cancel":
-                console.print("[dim]工具同步执行中可按 Ctrl+C 取消。[/dim]")
+                console.print(
+                    "[dim]当前没有后台任务；审查或搜索运行时按 Ctrl+C 可立即取消。[/dim]"
+                )
             else:
                 console.print(f"[red]未知命令：{command}[/red]")
                 console.print(_slash_help(), markup=False)
@@ -994,7 +1062,9 @@ def run_repl(state: CLIState) -> None:
 def main() -> None:
     json_mode = "--json" in sys.argv[1:]
     try:
-        app(prog_name="mailweek", standalone_mode=False)
+        exit_code = app(prog_name="mailweek", standalone_mode=False)
+        if isinstance(exit_code, int) and exit_code != 0:
+            raise SystemExit(exit_code)
     except MailweekError as exc:
         emit_error(exc.as_dict(), json_mode=json_mode)
         raise SystemExit(1) from exc

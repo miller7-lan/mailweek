@@ -379,6 +379,7 @@ def build_tool_registry(
 
     def perform_search(parsed: SearchEmailsArgs):
         account = services.account(parsed.account)
+        target_folder = parsed.folder or account.folder
         search_key = {
             "from": parsed.date_from.isoformat(),
             "to": parsed.date_to.isoformat(),
@@ -386,13 +387,14 @@ def build_tool_registry(
         if (
             services.session.last_range != search_key
             or services.session.last_account != account.name
+            or services.session.last_folder != target_folder
         ):
             services.session.reset_analysis()
         result = services.mail.search(
             account,
             date_from=parsed.date_from,
             date_to=parsed.date_to,
-            folder=parsed.folder,
+            folder=target_folder,
             sender=parsed.sender,
             subject=parsed.subject,
             limit=parsed.limit,
@@ -455,8 +457,19 @@ def build_tool_registry(
     def emails_classify_batch(args: BaseModel) -> ToolExecutionResult:
         parsed = ClassifyBatchArgs.model_validate(args)
         account = services.account(parsed.account)
+        target_folder = parsed.folder or account.folder
+        if (
+            services.session.last_account is not None
+            and (
+                services.session.last_account != account.name
+                or services.session.last_folder != target_folder
+            )
+        ):
+            services.session.reset_analysis()
+        services.session.last_account = account.name
+        services.session.last_folder = target_folder
         contents = [
-            services.mail.get_content(account, uid, folder=parsed.folder, max_chars=3000)
+            services.mail.get_content(account, uid, folder=target_folder, max_chars=3000)
             for uid in parsed.uids
         ]
         analyzer = classifier_analyzer()

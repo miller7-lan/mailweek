@@ -7,8 +7,11 @@ from rich.console import Console
 from mailweek.cli import _parse_review_index
 from mailweek.render import (
     RichEventRenderer,
+    emit_accounts,
     emit_agent_result,
     emit_email_detail,
+    emit_error,
+    emit_review_registry,
     emit_startup_banner,
 )
 from mailweek.schemas import (
@@ -48,6 +51,8 @@ def test_startup_banner_renders_wide_mail_icon_and_status() -> None:
     assert "本地 · 只读 · Ollama 邮件 Agent" in output
     assert "qwen3.5:9b" in output
     assert "work" in output
+    assert "直接描述需求" in output
+    assert "/review" in output
 
 
 def test_startup_banner_uses_compact_icon_in_narrow_terminal() -> None:
@@ -60,6 +65,8 @@ def test_startup_banner_uses_compact_icon_in_narrow_terminal() -> None:
     assert "✉  MAILWEEK" in output
     assert "账户 未选择" in output
     assert "╭────────────╮" not in output
+    assert "先添加邮箱账户" in output
+    assert "/account add" in output
 
 
 def test_agent_review_renders_registry_before_advice(capsys) -> None:
@@ -86,6 +93,8 @@ def test_agent_review_renders_registry_before_advice(capsys) -> None:
     assert "请确认项目发布时间" in output
     assert "待处理" in output
     assert "输入编号" in output
+    assert "建议先处理 #1" in output
+    assert "直接输入 1" in output
     assert "邮箱出处：QQ邮箱 · work · user@qq.com" in output
     assert "项目等待发布确认" not in output
     assert "模型的长回答不应" not in output
@@ -112,7 +121,65 @@ def test_email_detail_separates_ai_advice_and_read_only_body(capsys) -> None:
     assert "邮件正文（只读）" in output
     assert "这是邮件的具体正文" in output
     assert "邮箱出处：QQ邮箱 · work · user@qq.com" in output
-    assert "/back" in output
+    assert "下一步：" in output
+    assert "/back 返回登记簿" in output
+    assert "输入其他编号切换邮件" in output
+    assert "/list P0" in output
+
+
+def test_empty_review_filter_explains_how_to_recover() -> None:
+    buffer = StringIO()
+    console = Console(file=buffer, width=100, color_system=None)
+
+    emit_review_registry(
+        [],
+        summary=None,
+        total=6,
+        filter_label="P1",
+        console=console,
+    )
+
+    output = buffer.getvalue()
+    assert "当前筛选没有结果" in output
+    assert "/list 返回全部" in output
+    assert "/list 待处理" in output
+
+
+def test_account_list_explains_switch_and_add_commands(capsys) -> None:
+    emit_accounts(
+        [
+            {
+                "name": "work",
+                "provider": "QQ邮箱",
+                "email": "user@qq.com",
+                "host": "imap.qq.com",
+                "active": True,
+            }
+        ],
+        json_mode=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "下一步：" in output
+    assert "/account 名称" in output
+    assert "/account add" in output
+
+
+def test_human_error_labels_recovery_hint_as_next_step(capsys) -> None:
+    emit_error(
+        {
+            "ok": False,
+            "error": {
+                "message": "还没有配置邮箱账户。",
+                "hint": "输入 /account add 新增账户。",
+            },
+        },
+        json_mode=False,
+    )
+
+    output = capsys.readouterr().err
+    assert "错误：还没有配置邮箱账户" in output
+    assert "下一步：输入 /account add" in output
 
 
 def test_non_terminal_progress_only_prints_milestones(capsys) -> None:
@@ -133,6 +200,42 @@ def test_non_terminal_progress_only_prints_milestones(capsys) -> None:
     assert "分类登记 2/3" not in output
     assert "分类登记 3/3" in output
     assert "已登记 3 封邮件" in output
+
+
+def test_tool_selection_explains_the_operation_in_user_language(capsys) -> None:
+    renderer = RichEventRenderer(json_mode=False)
+
+    renderer(
+        "tools_selected",
+        {"tools": ["accounts.get_active", "accounts.list", "reviews.generate"]},
+    )
+
+    output = capsys.readouterr().out
+    assert "准备审查邮件" in output
+    assert "生成优先级登记簿" in output
+    assert "只读" in output
+    assert "accounts.get_active" not in output
+
+
+def test_long_review_operation_explains_wait_and_cancel(capsys) -> None:
+    renderer = RichEventRenderer(json_mode=False)
+
+    renderer("tool_start", {"tool": "reviews.generate"})
+
+    output = capsys.readouterr().out
+    assert "正在读取并分类" in output
+    assert "Ctrl+C" in output
+
+
+def test_model_route_explains_accuracy_fallback(capsys) -> None:
+    renderer = RichEventRenderer(json_mode=False)
+
+    renderer("model_route", {"model": "qwen3.5:4b", "fallback": "qwen3.5:9b"})
+
+    output = capsys.readouterr().out
+    assert "qwen3.5:4b" in output
+    assert "qwen3.5:9b" in output
+    assert "自动复核" in output
 
 
 def test_review_index_parser_only_accepts_positive_numbers() -> None:
