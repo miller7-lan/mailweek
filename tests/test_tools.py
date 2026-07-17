@@ -185,3 +185,165 @@ def test_reviews_generate_orchestrates_single_email_calls_and_programmatic_summa
     assert len(ollama.calls) == 2
     assert {call["model"] for call in ollama.calls} == {"qwen3.5:4b"}
     assert [data["current"] for event, data in events if event == "tool_progress"] == [1, 2]
+
+
+def test_reviews_generate_does_not_reuse_uid_classification_across_folders() -> None:
+    account = AccountConfig(
+        name="work",
+        email="user@example.com",
+        host="imap.example.com",
+        username="user@example.com",
+    )
+
+    class FakeConfigStore:
+        def load(self):
+            return AppConfig(active_account="work", accounts={"work": account})
+
+    class FakeMail:
+        def search(self, _account, **kwargs):
+            folder = kwargs["folder"]
+            return SearchResult(
+                account="work",
+                folder=folder,
+                date_from=date(2026, 7, 6),
+                date_to=date(2026, 7, 12),
+                total_found=1,
+                returned=1,
+                truncated=False,
+                emails=[
+                    EmailHeader(
+                        uid="1",
+                        subject=f"{folder} 中的邮件",
+                        sender="sender@example.com",
+                    )
+                ],
+            )
+
+        def get_content(self, _account, uid, **kwargs):
+            folder = kwargs["folder"]
+            return EmailContent(
+                uid=uid,
+                subject=f"{folder} 中的邮件",
+                sender="sender@example.com",
+                body=f"{folder} 的不可信正文",
+                content_type="text/plain",
+                truncated=False,
+            )
+
+    class FakeOllama:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            score = 80 if len(self.calls) == 1 else 20
+            return NormalizedMessage(
+                content=json.dumps(
+                    {
+                        "priority_score": score,
+                        "theme": "工作项目" if score == 80 else "新闻订阅",
+                        "summary": "测试摘要",
+                        "importance_reason": "测试原因",
+                        "action_required": score == 80,
+                        "suggested_action": "回复" if score == 80 else None,
+                        "confidence": 0.9,
+                    },
+                    ensure_ascii=False,
+                ),
+                thinking="",
+                tool_calls=[],
+            )
+
+        def installed_models(self):
+            return ["qwen3.5:4b", "test-model"]
+
+    ollama = FakeOllama()
+    services = RuntimeServices(
+        config_store=FakeConfigStore(),  # type: ignore[arg-type]
+        secrets=object(),  # type: ignore[arg-type]
+        mail=FakeMail(),  # type: ignore[arg-type]
+        ollama=ollama,  # type: ignore[arg-type]
+        session=SessionContext(active_account="work", model="test-model"),
+    )
+    registry = build_tool_registry(services)
+    arguments = {
+        "date_from": "2026-07-06",
+        "date_to": "2026-07-12",
+        "limit": 10,
+    }
+
+    registry.execute("reviews.generate", {**arguments, "folder": "INBOX"})
+    result = registry.execute("reviews.generate", {**arguments, "folder": "Archive"})
+
+    assert len(ollama.calls) == 2
+    assert isinstance(result.output, dict)
+    assert result.output["items"][0]["subject"] == "Archive 中的邮件"
+    assert services.session.last_folder == "Archive"
+
+
+def test_classify_batch_resets_review_items_when_folder_changes() -> None:
+    account = AccountConfig(
+        name="work",
+        email="user@example.com",
+        host="imap.example.com",
+        username="user@example.com",
+    )
+
+    class FakeConfigStore:
+        def load(self):
+            return AppConfig(active_account="work", accounts={"work": account})
+
+    class FakeMail:
+        def get_content(self, _account, uid, **kwargs):
+            folder = kwargs["folder"]
+            return EmailContent(
+                uid=uid,
+                subject=f"{folder} 中的邮件 {uid}",
+                sender="sender@example.com",
+                body="不可信正文",
+                content_type="text/plain",
+                truncated=False,
+            )
+
+    class FakeOllama:
+        def chat(self, **_kwargs):
+            return NormalizedMessage(
+                content=json.dumps(
+                    {
+                        "priority_score": 50,
+                        "theme": "工作项目",
+                        "summary": "测试摘要",
+                        "importance_reason": "测试原因",
+                        "action_required": False,
+                        "confidence": 0.9,
+                    },
+                    ensure_ascii=False,
+                ),
+                thinking="",
+                tool_calls=[],
+            )
+
+        def installed_models(self):
+            return ["qwen3.5:4b", "test-model"]
+
+    services = RuntimeServices(
+        config_store=FakeConfigStore(),  # type: ignore[arg-type]
+        secrets=object(),  # type: ignore[arg-type]
+        mail=FakeMail(),  # type: ignore[arg-type]
+        ollama=FakeOllama(),  # type: ignore[arg-type]
+        session=SessionContext(active_account="work", model="test-model"),
+    )
+    registry = build_tool_registry(services)
+
+    registry.execute(
+        "emails.classify_batch",
+        {"uids": ["1"], "folder": "INBOX"},
+    )
+    registry.execute(
+        "emails.classify_batch",
+        {"uids": ["2"], "folder": "Archive"},
+    )
+
+    assert [item.uid for item in services.session.review_items()] == ["2"]
+    assert services.session.last_account == "work"
+    assert services.session.last_folder == "Archive"

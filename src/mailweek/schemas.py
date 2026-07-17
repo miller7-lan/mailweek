@@ -126,11 +126,24 @@ class EmailClassification(BaseModel):
 class EmailDecision(BaseModel):
     """The model's decision for one email; identity is supplied by the program."""
 
-    priority_score: Annotated[int, Field(ge=0, le=100)]
+    priority_score: Annotated[
+        int,
+        Field(
+            ge=0,
+            le=100,
+            description=(
+                "综合重要度，不等同于紧急度或是否需要行动；用于报销对账的正式账单、"
+                "正式报告和项目记录即使无需操作也应为 40-69"
+            ),
+        ),
+    ]
     theme: Theme
     summary: Annotated[str, Field(min_length=1, max_length=500)]
     importance_reason: Annotated[str, Field(min_length=1, max_length=500)]
-    action_required: bool
+    action_required: Annotated[
+        bool,
+        Field(description="用户是否需要回复、决策或处理；必须与信息重要度分别判断"),
+    ]
     suggested_action: Annotated[str | None, Field(max_length=500)] = None
     due_at: datetime | None = None
     confidence: Annotated[float, Field(ge=0, le=1)]

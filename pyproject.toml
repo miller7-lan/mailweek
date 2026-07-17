@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mailweek"
-version = "0.3.0"
+version = "0.3.3"
 description = "A read-only, Ollama-powered CLI agent for weekly email reviews"
 readme = "README.md"
 requires-python = ">=3.11"

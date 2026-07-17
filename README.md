@@ -51,6 +51,14 @@ mailweek
 启动时会显示自适应终端标志：宽终端使用信封 ASCII 品牌页并展示模型、账户状态，窄终端
 自动切换为单行 `✉ MAILWEEK` 紧凑标志。
 
+终端视觉使用一致的状态语言：启动页展示 `READ ONLY`、`MODEL`、`ACCOUNT` 和
+`QUICK START`；审查过程按 `PLAN → RUNNING → MODEL ROUTE → COMPLETE` 显示当前阶段。
+所有徽标只改善信息层级，不改变命令、JSON 协议或分类流程。
+
+启动后会显示全局快捷预设：Mac 键盘直接按 `1` 审查上一个完整自然周、
+按 `2` 审查今天的重点邮件、按 `3` 进入自定义命令/自然语言输入，均无需先按回车。
+在登记簿中数字仍用于打开邮件；任意页面输入 `/quick` 可重新呼出预设。
+
 可以在 Agent 会话内新增和切换邮箱：
 
 ```text
@@ -90,6 +98,9 @@ IMAP；应用专用密码使用隐藏输入且只写入 macOS 钥匙串。账户
 │ 2    │ P3     │ 新闻订阅 │ 仅查看   │ 每周资讯摘要       │
 └──────┴────────┴──────────┴──────────┴────────────────────┘
 ```
+
+登记簿在宽终端显示完整分类与发件人列，在窄终端自动收敛为编号、优先级、状态和主题；
+详情页用 `ACTION REQUIRED`、`READ ONLY` 与 `NAVIGATION` 区分行动建议、只读正文和后续操作。
 
 - 输入 `1` 或 `/open 1`：打开第 1 封邮件。
 - 详情页分开显示邮件元数据、AI 判断与建议、最多 6000 字符的只读正文。
@@ -136,12 +147,18 @@ mailweek tool call emails.search --args-json \
 
 ```bash
 mailweek --json models benchmark --runs 2
-# 运行 P0–P4 五类固定合成质量用例：
+# 运行覆盖 P0–P4、边界校准和提示词注入的完整合成质量套件：
 mailweek --json models benchmark --suite
+# 只复测一个命名用例：
+mailweek --json models benchmark --case invoice_record --runs 2
 # 与旧参数进行可重复对照：
 mailweek --json models benchmark --body-chars 2200 --num-predict 700 \
   --num-ctx 8192 --schema-in-prompt
 ```
+
+基准只有在所有输出格式有效，并且优先级与行动判断全部命中时才返回 `ok: true`；质量
+失败会使用非零退出码，方便直接接入 CI。结果同时报告 `valid_outputs`、
+`expected_matches` 和 `match_rate`。
 
 ```bash
 mailweek --json tools describe reviews.generate
