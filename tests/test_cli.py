@@ -2,17 +2,31 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
+from prompt_toolkit import PromptSession
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from pydantic import BaseModel
 from typer.testing import CliRunner
 
-from mailweek.cli import _open_review_item, _slash_help, app, main
+from mailweek.cli import (
+    CLIState,
+    _open_review_item,
+    _quick_choice_command,
+    _quick_key_bindings,
+    _slash_help,
+    app,
+    main,
+    run_repl,
+)
 from mailweek.config import ConfigStore, KeyringSecretStore
 from mailweek.mail import MailService
 from mailweek.schemas import (
     AccountConfig,
+    AgentRunResult,
     EmailClassification,
     EmailContent,
     Theme,
@@ -127,6 +141,115 @@ def test_repl_help_discovers_account_add_and_provider_commands() -> None:
     assert "/list 待处理" in help_text
     assert "/account add" in help_text
     assert "/account providers" in help_text
+    assert "/quick" in help_text
+    assert "/today" in help_text
+    assert "3  自定义命令" in help_text
+
+
+def test_quick_choice_accepts_mac_number_key_without_enter() -> None:
+    with create_pipe_input() as pipe_input:
+        session: PromptSession[str] = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=_quick_key_bindings(lambda: True),
+        )
+        pipe_input.send_text("1")
+
+        assert session.prompt() == "1"
+
+
+def test_number_keys_keep_multi_digit_mail_indices_outside_quick_mode() -> None:
+    with create_pipe_input() as pipe_input:
+        session: PromptSession[str] = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=_quick_key_bindings(lambda: False),
+        )
+        pipe_input.send_text("12\n")
+
+        assert session.prompt() == "12"
+
+
+def test_quick_presets_map_to_review_today_and_custom_command() -> None:
+    custom_requests: list[str] = []
+
+    def custom_command() -> str:
+        custom_requests.append("asked")
+        return "/list P0"
+
+    assert _quick_choice_command("1", custom_command) == "/review"
+    assert _quick_choice_command("2", custom_command) == "/today"
+    assert _quick_choice_command("3", custom_command) == "/list P0"
+    assert custom_requests == ["asked"]
+
+
+def test_repl_custom_preset_runs_the_entered_command(monkeypatch) -> None:
+    inputs = iter(("3", "找出今天需要处理的账单", "/exit"))
+    prompts: list[str] = []
+
+    class FakePromptSession:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def prompt(self, *_args, **_kwargs) -> str:
+            prompt = _args[0] if _args else ""
+            prompts.append(str(getattr(prompt, "value", prompt)))
+            return next(inputs)
+
+    requests: list[str] = []
+
+    class FakeAgent:
+        events = SimpleNamespace(close=lambda: None)
+
+        def run(self, prompt: str) -> AgentRunResult:
+            requests.append(prompt)
+            return AgentRunResult(answer="已完成")
+
+    session = SessionContext(active_account=None, model="fake")
+    runtime = SimpleNamespace(
+        services=SimpleNamespace(session=session),
+        close=lambda: None,
+    )
+    monkeypatch.setattr("mailweek.cli.PromptSession", FakePromptSession)
+    monkeypatch.setattr("mailweek.cli._agent", lambda _state: FakeAgent())
+
+    run_repl(CLIState(json_mode=False, runtime=runtime))  # type: ignore[arg-type]
+
+    assert requests == ["找出今天需要处理的账单"]
+    assert "mailweek:custom" in prompts[1]
+
+
+def test_repl_today_preset_uses_an_exact_date_range(monkeypatch) -> None:
+    inputs = iter(("2", "/exit"))
+
+    class FakePromptSession:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def prompt(self, *_args, **_kwargs) -> str:
+            return next(inputs)
+
+    requests: list[str] = []
+
+    class FakeAgent:
+        events = SimpleNamespace(close=lambda: None)
+
+        def run(self, prompt: str) -> AgentRunResult:
+            requests.append(prompt)
+            return AgentRunResult(answer="已完成")
+
+    session = SessionContext(active_account=None, model="fake")
+    runtime = SimpleNamespace(
+        services=SimpleNamespace(session=session),
+        close=lambda: None,
+    )
+    monkeypatch.setattr("mailweek.cli.PromptSession", FakePromptSession)
+    monkeypatch.setattr("mailweek.cli._agent", lambda _state: FakeAgent())
+    monkeypatch.setattr("mailweek.cli._today", lambda: date(2026, 7, 18))
+
+    run_repl(CLIState(json_mode=False, runtime=runtime))  # type: ignore[arg-type]
+
+    assert requests == ["回顾 2026-07-18 到 2026-07-18 的邮件，按重要性排序。"]
 
 
 def test_doctor_json_works_without_account_or_running_ollama(tmp_path, monkeypatch) -> None:

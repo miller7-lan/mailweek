@@ -5,14 +5,16 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 import typer
 from prompt_toolkit import PromptSession
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import Progress
@@ -38,6 +40,7 @@ from .render import (
     emit_email_detail,
     emit_error,
     emit_providers,
+    emit_quick_presets,
     emit_review_registry,
     emit_startup_banner,
     emit_tools,
@@ -208,9 +211,13 @@ def ask(
 
 
 def _last_week() -> tuple[date, date]:
-    today = __import__("datetime").datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    today = _today()
     this_monday = today - timedelta(days=today.weekday())
     return this_monday - timedelta(days=7), this_monday - timedelta(days=1)
+
+
+def _today() -> date:
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()
 
 
 def _parse_date(value: str, option: str) -> date:
@@ -735,8 +742,14 @@ def emails_list(
 def _slash_help() -> str:
     return (
         "可以直接输入自然语言，例如：开始审查最近一周的信件\n\n"
+        "全局快捷预设\n"
+        "  1  上周完整审查（数字键直接选择）\n"
+        "  2  今日重点\n"
+        "  3  自定义命令或自然语言\n"
+        "  /quick                     随时重新打开快捷预设\n\n"
         "常用操作\n"
         "  /review                     分类并登记上周邮件\n"
+        "  /today                      分类并登记今天的邮件\n"
         "  输入编号 或 /open 编号       查看 AI 建议与邮件正文\n"
         "  /list                       返回完整登记簿\n"
         "  /list P0                    只看紧急邮件\n"
@@ -810,6 +823,33 @@ def _parse_review_index(value: str) -> int | None:
     return index if index > 0 else None
 
 
+def _quick_key_bindings(is_active: Callable[[], bool]) -> KeyBindings:
+    bindings = KeyBindings()
+    active = Condition(is_active)
+
+    def accept_choice(choice: str) -> Callable[[KeyPressEvent], None]:
+        def handler(event: KeyPressEvent) -> None:
+            event.current_buffer.insert_text(choice)
+            if event.current_buffer.text == choice:
+                event.current_buffer.validate_and_handle()
+
+        return handler
+
+    for choice in ("1", "2", "3"):
+        bindings.add(choice, filter=active)(accept_choice(choice))
+    return bindings
+
+
+def _quick_choice_command(choice: str, read_custom: Callable[[], str]) -> str:
+    if choice == "1":
+        return "/review"
+    if choice == "2":
+        return "/today"
+    if choice == "3":
+        return read_custom().strip()
+    return choice
+
+
 def _open_review_item(state: CLIState, agent: AgentLoop, index: int) -> bool:
     session = state.runtime.services.session
     items = session.review_items()
@@ -868,19 +908,47 @@ def run_repl(state: CLIState) -> None:
         ),
         console=console,
     )
+    emit_quick_presets(console=console)
     agent = _agent(state)
-    prompt_session: PromptSession[str] = PromptSession()
     last_interrupt = 0.0
     selected_index: int | None = None
+    quick_mode = True
+    quick_key_active = False
+    prompt_session: PromptSession[str] = PromptSession(
+        key_bindings=_quick_key_bindings(lambda: quick_key_active)
+    )
     while True:
         try:
-            if selected_index is not None:
+            quick_context = quick_mode or (
+                selected_index is None
+                and not state.runtime.services.session.last_review_uids
+            )
+            quick_key_active = quick_context
+            if quick_context:
+                prompt = "<ansicyan>mailweek:quick&gt;</ansicyan> "
+            elif selected_index is not None:
                 prompt = f"<ansicyan>mailweek:mail#{selected_index}&gt;</ansicyan> "
             elif state.runtime.services.session.last_review_uids:
                 prompt = "<ansicyan>mailweek:list&gt;</ansicyan> "
             else:
                 prompt = "<ansicyan>mailweek&gt;</ansicyan> "
             text = prompt_session.prompt(HTML(prompt)).strip()
+            if quick_context and text in {"1", "2", "3"}:
+                quick_key_active = False
+                text = _quick_choice_command(
+                    text,
+                    lambda: prompt_session.prompt(
+                        HTML("<ansimagenta>mailweek:custom&gt;</ansimagenta> ")
+                    ),
+                ).strip()
+                if not text:
+                    console.print(
+                        "[dim]已取消自定义输入；请重新选择 1 / 2 / 3。[/dim]"
+                    )
+                    continue
+                quick_mode = False
+            elif quick_context:
+                quick_mode = False
         except EOFError:
             break
         except KeyboardInterrupt:
@@ -904,6 +972,9 @@ def run_repl(state: CLIState) -> None:
                 break
             if command == "/help":
                 console.print(_slash_help(), markup=False)
+            elif command == "/quick":
+                quick_mode = True
+                emit_quick_presets(console=console)
             elif command == "/tools":
                 tools_list_for_repl = [
                     {
@@ -1016,6 +1087,23 @@ def run_repl(state: CLIState) -> None:
                         force_registry=True,
                     ),
                 )
+            elif command == "/today":
+                today = _today()
+                review_prompt = (
+                    f"回顾 {today.isoformat()} 到 {today.isoformat()} 的邮件，"
+                    "按重要性排序。"
+                )
+                selected_index = None
+                _handle(
+                    state,
+                    partial(
+                        _run_agent_and_render,
+                        state,
+                        agent,
+                        review_prompt,
+                        force_registry=True,
+                    ),
+                )
             elif command == "/list":
                 selected_index = None
                 _show_review_registry(state, argument or None)
@@ -1031,11 +1119,13 @@ def run_repl(state: CLIState) -> None:
             elif command == "/clear":
                 agent.clear()
                 selected_index = None
+                quick_mode = True
                 console.print("[green]✓[/green] 当前会话上下文和登记簿已清除。")
                 console.print(
                     "[bold bright_cyan]下一步：[/bold bright_cyan]"
                     "输入 [bold]/review[/bold] 重新生成登记簿，或直接描述新任务。"
                 )
+                emit_quick_presets(console=console)
             elif command == "/cancel":
                 console.print(
                     "[dim]当前没有后台任务；审查或搜索运行时按 Ctrl+C 可立即取消。[/dim]"
